@@ -86,3 +86,13 @@ test('Gateway retention is bounded by bytes and reports dropped events', async (
     assert(gateway.getEvents(after).dropped_events);
   } finally { gateway.disconnect(); }
 });
+test('disconnect while Gateway discovery is pending cannot reopen a socket after shutdown', async () => {
+  let finish!: (value: Response) => void;
+  const rest = new DiscordRest({ ...config, fetch: async () => new Promise<Response>(resolve => { finish = resolve; }) });
+  let opened = 0;
+  const gateway = new DiscordGateway(config, rest, { socketFactory: () => { opened++; return new FakeSocket() as unknown as WebSocket; } });
+  const pending = gateway.connect();
+  while (!finish) await new Promise(resolve => setImmediate(resolve));
+  gateway.disconnect(); finish(new Response('{"url":"wss://gateway.discord.gg"}'));
+  await assert.rejects(pending, /disconnected/); assert.equal(opened, 0); assert.equal(gateway.status().state, 'disconnected');
+});

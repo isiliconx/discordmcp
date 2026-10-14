@@ -39,7 +39,7 @@ export async function setup(directory: string = process.cwd()) {
   const token = await hiddenToken();
   loadConfig({ DISCORD_TOKEN: token, DISCORD_AUTH_TYPE: authType });
   const httpToken = randomBytes(32).toString('hex');
-  const env = `DISCORD_AUTH_TYPE=${authType}\nDISCORD_TOKEN=${JSON.stringify(token)}\nMCP_HTTP_TOKEN=${httpToken}\nMCP_TOOL_MODE=full\n`;
+  const env = `DISCORD_AUTH_TYPE=${authType}\nDISCORD_TOKEN=${JSON.stringify(token)}\nMCP_HTTP_TOKEN=${httpToken}\nMCP_TOOL_MODE=full\nMCP_ARCHIVE_ENABLED=true\nMCP_ARCHIVE_PATH=${JSON.stringify(resolve(target, '.discordmcp', 'messages.sqlite'))}\nMCP_ARCHIVE_AUTOCONNECT=true\n`;
   const entry = resolve(dirname(fileURLToPath(import.meta.url)), 'index.js');
   const mcp = { mcpServers: { discord: { command: process.execPath, args: [entry, '--env-file', envPath] } } };
   await writeFile(envPath, env, { mode: 0o600, flag: 'wx' });

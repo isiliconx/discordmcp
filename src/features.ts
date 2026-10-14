@@ -1,12 +1,14 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
-import type { DiscordRest } from './rest.js';
+import { DiscordApiError, type DiscordRest } from './rest.js';
 import { matchesSecret } from './security.js';
+import type { MessageArchive } from './archive.js';
 
 interface HistoryCursor { v: 1; channel: string; before: string; snapshot: string }
 interface HistoryArgs {
   channel_id: string; cursor?: string; before?: string; max_messages?: number;
   page_size?: number; format?: 'full' | 'compact';
+  include_archived?: boolean;
 }
 interface SearchArgs { guild_id?: string; channel_id?: string; query?: Record<string, unknown>; max_wait_ms?: number }
 interface MessageArgs {
@@ -18,13 +20,14 @@ function compactMessage(message: any) {
     author: { id: message.author?.id, username: message.author?.username, global_name: message.author?.global_name },
     content: message.content, timestamp: message.timestamp, edited_timestamp: message.edited_timestamp,
     attachments: message.attachments ?? [], embeds: message.embeds ?? [],
-    message_reference: message.message_reference, reactions: message.reactions ?? [] };
+    message_reference: message.message_reference, reactions: message.reactions ?? [],
+    ...(message.archive ? { archive: message.archive } : {}) };
 }
 export class DiscordFeatures {
   private readonly cursorKey: Buffer;
   constructor(token: string, private readonly rest: DiscordRest,
     private readonly wait: (ms: number, signal?: AbortSignal) => Promise<unknown> = (ms, signal) => sleep(ms, undefined, { signal }),
-    private readonly now: () => number = Date.now) {
+    private readonly now: () => number = Date.now, private readonly archive?: MessageArchive) {
     this.cursorKey = createHash('sha256').update('discordmcp/history-cursor/v1\0').update(token).digest();
   }
   private encodeCursor(cursor: HistoryCursor) {
@@ -48,16 +51,29 @@ export class DiscordFeatures {
     const pageSize = args.page_size ?? 100;
     if (!Number.isInteger(budget) || budget < 1 || budget > 1000 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new Error('History budget must be 1–1000 and page_size 1–100.');
     const cursor = args.cursor ? this.decodeCursor(args.cursor, args.channel_id) : undefined;
+    const archive = args.include_archived === false ? undefined : this.archive;
+    const ceiling = cursor?.before ?? args.before;
+    const latestSaved = archive?.list({ channel_id: args.channel_id, before: ceiling, limit: 1 })[0];
     let before = cursor?.before ?? args.before;
     let snapshot = cursor?.snapshot ?? args.before;
     const messages: any[] = [], seen = new Set<string>();
     let reachedStart = false, pages = 0;
+    let liveError: { http_status: number | null; note: string } | null = null;
     // Bound network work as well as output size; callers can continue with next_cursor.
     while (messages.length < budget && pages < 20) {
       signal?.throwIfAborted();
       const limit = Math.min(pageSize, budget - messages.length);
-      const response = await this.rest.request({ method: 'GET', path: `/channels/${args.channel_id}/messages`,
-        query: { limit, ...(before ? { before } : {}) } }, signal);
+      let response;
+      try {
+        response = await this.rest.request({ method: 'GET', path: `/channels/${args.channel_id}/messages`,
+          query: { limit, ...(before ? { before } : {}) } }, signal);
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (!archive || !latestSaved) throw error;
+        liveError = { http_status: error instanceof DiscordApiError ? error.status : null,
+          note: 'Live Discord history is unavailable. This result contains locally observed history only; current channel completeness cannot be verified.' };
+        reachedStart = true; break;
+      }
       pages++;
       if (!Array.isArray(response.data)) throw new Error('Discord did not return a history array.');
       const page = response.data as any[];
@@ -67,7 +83,11 @@ export class DiscordFeatures {
       const ids = page.map(message => BigInt(message.id));
       const oldest = ids.reduce((a, b) => a < b ? a : b).toString();
       if (before && BigInt(oldest) >= BigInt(before)) throw new Error('Discord history did not advance; stopping to avoid repeated reads.');
-      if (!snapshot) snapshot = (ids.reduce((a, b) => a > b ? a : b) + 1n).toString();
+      if (!snapshot) {
+        const latestLive = ids.reduce((a, b) => a > b ? a : b);
+        const latest = latestSaved && BigInt(latestSaved.id) > latestLive ? BigInt(latestSaved.id) : latestLive;
+        snapshot = (latest + 1n).toString();
+      }
       for (const message of page) {
         if (BigInt(message.id) >= BigInt(snapshot) || (before && BigInt(message.id) >= BigInt(before)) || seen.has(message.id)) continue;
         seen.add(message.id); messages.push(message);
@@ -76,11 +96,25 @@ export class DiscordFeatures {
       before = oldest;
       if (page.length < limit) { reachedStart = true; break; }
     }
+    if (!snapshot && latestSaved) snapshot = (BigInt(latestSaved.id) + 1n).toString();
+    let output = messages;
+    if (archive && snapshot) {
+      const saved = archive.list({ channel_id: args.channel_id, before: ceiling ?? snapshot,
+        after: reachedStart ? undefined : before, limit: budget + 1 });
+      const combined = new Map(messages.map(message => [message.id, message]));
+      for (const message of saved) combined.set(message.id, message);
+      const ordered = [...combined.values()].sort((a, b) => BigInt(a.id) > BigInt(b.id) ? -1 : BigInt(a.id) < BigInt(b.id) ? 1 : 0);
+      if (ordered.length > budget) reachedStart = false;
+      output = ordered.slice(0, budget);
+      if (output.length) before = output.at(-1)!.id;
+    }
     const nextCursor = !reachedStart && before && snapshot ? this.encodeCursor({ v: 1, channel: args.channel_id, before, snapshot }) : null;
-    return { source: 'discord', content_is_untrusted: true, channel_id: args.channel_id,
-      count: messages.length, pages, reached_start: reachedStart, has_more: !reachedStart,
+    return { source: liveError ? 'local_archive' : 'discord', content_is_untrusted: true, channel_id: args.channel_id,
+      count: output.length, pages, reached_start: reachedStart, has_more: !reachedStart,
       snapshot_before: snapshot ?? null, next_cursor: nextCursor,
-      messages: args.format === 'full' ? messages : messages.map(compactMessage) };
+      archive_included: Boolean(archive),
+      live_available: !liveError, ...(liveError ? { live_error: liveError } : {}),
+      messages: args.format === 'full' ? output : output.map(compactMessage) };
   }
   async searchMessages(args: SearchArgs, signal?: AbortSignal) {
     if (!args.guild_id && !args.channel_id) throw new Error('Specify guild_id or channel_id.');

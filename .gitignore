@@ -4,6 +4,11 @@ dist/
 .env.*
 !.env.example
 mcp.json
+.discordmcp/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.recorder.log
 *.log
 coverage/
 .DS_Store

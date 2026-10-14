@@ -28,7 +28,7 @@ test('MCP exposes every public and experimental operation, valid schemas, resour
   const { client, close } = await connect(makeRuntime());
   try {
     const { tools } = await client.listTools();
-    assert.equal(tools.length, publicOperations.length + userOperations.length + 17);
+    assert.equal(tools.length, publicOperations.length + userOperations.length + 21);
     assert.equal(new Set(tools.map(tool => tool.name)).size, tools.length);
     const ajv = new Ajv({ strict: false, allowUnionTypes: true, validateFormats: false });
     for (const tool of tools) assert.doesNotThrow(() => ajv.compile(tool.inputSchema), tool.name);
@@ -66,7 +66,7 @@ test('compact mode retains all operations through discovery and dispatcher', asy
     return new Response('[{"id":"123"}]');
   }));
   try {
-    assert.equal((await client.listTools()).tools.length, 17);
+    assert.equal((await client.listTools()).tools.length, 21);
     const discovered = await client.callTool({ name: 'discord_search_tools', arguments: { query: 'private channels', include_schemas: true } });
     assert.match(JSON.stringify(discovered), /discord_list_private_channels/);
     const result = await client.callTool({ name: 'discord_call', arguments: { name: 'discord_list_private_channels', arguments: {} } });
@@ -77,10 +77,10 @@ test('compact mode retains all operations through discovery and dispatcher', asy
 });
 test('actual stdio process initializes, exposes tools, calls capabilities, and keeps stdout protocol-clean', async () => {
   const client = new Client({ name: 'stdio-test', version: '1.0' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: ['dist/index.js'], env: { ...process.env as Record<string, string>, DISCORD_TOKEN: token, MCP_TOOL_MODE: 'compact' } });
+  const transport = new StdioClientTransport({ command: process.execPath, args: ['dist/index.js'], env: { ...process.env as Record<string, string>, DISCORD_TOKEN: token, MCP_TOOL_MODE: 'compact', MCP_ARCHIVE_ENABLED: 'false' } });
   try {
     await client.connect(transport);
-    assert.equal((await client.listTools()).tools.length, 17);
+    assert.equal((await client.listTools()).tools.length, 21);
     assert(!(await client.callTool({ name: 'discord_capabilities' })).isError);
   } finally { await client.close(); }
 });
@@ -100,7 +100,7 @@ test('Streamable HTTP authenticates clients, rejects bad hosts/origins, and work
     assert.equal(badHost, 403);
     assert.equal((await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${httpToken}`, Origin: 'https://evil.example', 'Content-Type': 'application/json' }, body: '{}' })).status, 403);
     await client.connect(new StreamableHTTPClientTransport(url, { requestInit: { headers: { Authorization: `Bearer ${httpToken}` } } }));
-    assert.equal((await client.listTools()).tools.length, 17);
+    assert.equal((await client.listTools()).tools.length, 21);
     assert(!(await client.callTool({ name: 'discord_capabilities' })).isError);
     assert.equal((await fetch(new URL('/health', url), { headers: { Authorization: `Bearer ${httpToken}` } })).status, 200);
     const oversize = await new Promise<number | undefined>((resolve, reject) => {

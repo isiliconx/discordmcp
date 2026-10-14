@@ -2,6 +2,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type { ApiRequest, ApiResponse, AuthType } from './types.js';
 import { redact, validateApiPath } from './security.js';
 import { VERSION } from './version.js';
+import type { RequestPacer } from './pacing.js';
 
 export class DiscordApiError extends Error {
   constructor(public readonly status: number, public readonly details: unknown) {
@@ -19,11 +20,13 @@ interface RestOptions {
   readOnly?: boolean;
   maxPendingRequests?: number;
   maxResponseBytes?: number;
+  pacer?: RequestPacer;
 }
 const BASE_URL = 'https://discord.com/api/v10';
 const MAX_UPLOAD = 25 * 1024 * 1024;
 
 export class DiscordRest {
+  private readonly responseObservers = new Set<(request: ApiRequest, response: ApiResponse) => void>();
   private tail: Promise<unknown> = Promise.resolve();
   private readonly deadlines = new Map<string, number>();
   private readonly buckets = new Map<string, string>();
@@ -37,9 +40,13 @@ export class DiscordRest {
     this.now = options.now ?? Date.now;
     this.sleep = options.sleep ?? ((ms, signal) => sleep(ms, undefined, { signal }));
   }
+  onResponse(observer: (request: ApiRequest, response: ApiResponse) => void) {
+    this.responseObservers.add(observer);
+    return () => { this.responseObservers.delete(observer); };
+  }
   request(request: ApiRequest, signal?: AbortSignal): Promise<ApiResponse> {
     if (this.options.readOnly && request.method !== 'GET') return Promise.reject(new Error('MCP_READ_ONLY blocks Discord API writes.'));
-    if (this.pendingRequests >= (this.options.maxPendingRequests ?? 100)) return Promise.reject(new Error('Discord request queue is full; retry later.'));
+    if (this.pendingRequests >= (this.options.maxPendingRequests ?? 10)) return Promise.reject(new Error('Discord request queue is full; retry later.'));
     this.pendingRequests++;
     // Serialize requests per account so simultaneous AI calls cannot race a learned bucket.
     const work = this.tail.then(() => this.performWithCompatibility(request, signal));
@@ -106,6 +113,7 @@ export class DiscordRest {
       totalWait += waitMs;
       if (totalWait > (this.options.maxRateLimitWaitMs ?? 120_000)) throw new Error('Discord rate limit requires a longer wait; try again later.');
       if (waitMs > 0) await this.sleep(waitMs, signal);
+      await this.options.pacer?.beforeRequest(request.method, request.path, signal);
       const timeout = AbortSignal.timeout(this.options.requestTimeoutMs ?? 30_000);
       const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
       let response: Response;
@@ -114,6 +122,7 @@ export class DiscordRest {
       } catch {
         // Never retry ambiguous network failures: a write may already have succeeded.
         if (signal?.aborted) signal.throwIfAborted();
+        this.options.pacer?.networkFailure();
         throw new Error('Discord request failed or timed out. A write may have succeeded; check before repeating it.');
       }
       const learned = response.headers.get('x-ratelimit-bucket');
@@ -130,6 +139,7 @@ export class DiscordRest {
       }
       let data: unknown = null;
       if (raw) { try { data = JSON.parse(raw); } catch { data = raw; } }
+      this.options.pacer?.observe(request.method, request.path, response.status, data);
       if (response.status === 429 && attempt < 5) {
         const limited = data as { retry_after?: number; global?: boolean } | null;
         const retry = Number(limited?.retry_after ?? response.headers.get('retry-after'));
@@ -141,7 +151,9 @@ export class DiscordRest {
       }
       const safeData = redact(data, [this.options.token]);
       if (!response.ok) throw new DiscordApiError(response.status, safeData);
-      return { status: response.status, data: safeData };
+      const result = { status: response.status, data: safeData };
+      for (const observer of this.responseObservers) observer(request, result);
+      return result;
     }
     throw new Error('Discord rate limit retry budget exhausted.');
   }

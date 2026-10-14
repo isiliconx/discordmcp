@@ -5,7 +5,7 @@ and Discord API. Credentials, account identifiers, membership lists, and private
 message contents are excluded from this record.
 
 The reproducible isolated suite passed **30 checks, 0 failures** with version 1.1.
-The automated suite passes 27 tests. These
+The version 1.1 automated suite passed 27 tests. These
 results verify a representative subset; they do not certify every advertised
 operation or every account’s permissions.
 
@@ -72,6 +72,36 @@ Other state-changing user/account/server operations, application interactions,
 presence, and voice-state signalling were not live-tested in this run. Voice/video
 media streaming remains unimplemented. Message tests were confined to self-only group DMs; existing contacts and
 other users were not messaged.
+
+## Version 1.2 archive and pacing validation
+
+The current automated suite passes **42 tests**, including persistent archives,
+partial and empty edits, single/bulk deletions, unknown original content, stale
+snapshot protection, deleted/live history paging, explicit offline fallback,
+multiple database handles, event-buffer eviction, and shared pacing/circuit stops.
+
+The background recorder reached Gateway READY and saved incoming CREATE/UPDATE
+observations to its private database. Separate MCP processes read the exact saved
+content and channel history successfully without publishing that content here.
+The normal history helper merged live and saved history; it also returned an
+explicit local-only result when the previous credential stopped authenticating.
+After a replacement credential was verified with a single read-only user lookup,
+the same-account archive was preserved, the recorder restarted, and the normal
+history helper again completed a live read. Full mode advertised 287 tools.
+
+The new isolated CREATE/UPDATE/DELETE archive script was attempted, but the
+previous credential returned HTTP 401 before a fixture was created. It was not
+rerun against the replacement account. Replacement-account checks were read-only;
+no messages, reactions, server changes, or group-DM fixtures were sent/created.
+Actual deletion retention is covered by automated event/transport tests, not
+claimed as a completed live deletion cycle for version 1.2.
+
+Shared limits are verified with fake clocks and independent database handles:
+request/write spacing, rolling caps, cancellable slots, 45/10-minute breaks,
+authentication/verification stops, forbidden-route cooldowns, and 429/network
+failure stops. Production code applies these controls to REST and application
+Gateway sends; managed heartbeat timing is preserved. Timing controls do not
+certify the account against platform flags.
 
 ## Reproduce
 

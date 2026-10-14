@@ -4,8 +4,8 @@ Give an MCP-compatible AI client access to Discord through a locally held token.
 The setup command saves your token privately and generates the MCP configuration
 you can add to your client. Supports stdio and authenticated Streamable HTTP.
 
-**283 tools in full mode:** 246 public REST operations generated from Discord’s
-official v10 API specification, 20 experimental user-account operations, and 17
+**287 tools in full mode:** 246 public REST operations generated from Discord’s
+official v10 API specification, 20 experimental user-account operations, and 21
 MCP/Gateway helper tools. All operations remain callable in compact mode.
 No read-only restriction is imposed by the server: actions run with the supplied
 account’s Discord permissions. The MCP client may require its own tool approvals.
@@ -25,7 +25,7 @@ OAuth2 scopes and Discord permissions still apply.
 
 ## Quick start
 
-Requires Node.js 22 or newer.
+Requires Node.js 22.13 or newer (uses the bundled SQLite runtime).
 
 ```bash
 git clone https://github.com/isiliconx/discordmcp.git
@@ -74,9 +74,9 @@ client’s `env` configuration to supply `DISCORD_TOKEN` and `DISCORD_AUTH_TYPE`
 instead of an environment file, but the client configuration then contains a
 credential. Setup keeps credentials in `.env` instead.
 
-Full mode advertises all 283 tools in one tools/list response. Some clients have
+Full mode advertises all 287 tools in one tools/list response. Some clients have
 limits on tool count or context size. Set `MCP_TOOL_MODE=compact` in `.env` to
-advertise only the 17 helpers; the AI then uses `discord_search_tools`,
+advertise only the 21 helpers; the AI then uses `discord_search_tools`,
 `discord_describe_operation`, and `discord_call` to access any of the 266 REST
 operations. This does not reduce available actions.
 
@@ -127,6 +127,93 @@ Gateway connection lifecycle still runs. Full access is the default. The setting
 applies to every tool, including the general API and helper tools, and requires a
 server restart to change. See the [operating safeguards](docs/OPERATING_GUIDE.md)
 for exact boundaries and verification.
+
+## Persistent deleted messages and edit versions
+
+Version 1.2 adds an optional local SQLite archive. Setup enables it in a private
+`.discordmcp/` directory; manual installations can set `MCP_ARCHIVE_ENABLED=true`
+and an absolute `MCP_ARCHIVE_PATH` inside a directory with permissions `0700`.
+The database and its journal files use owner-only permissions and are ignored by
+Git. Without an explicit path, an account-credential-specific directory in the
+user's local data directory is used. The archive is local and unencrypted.
+
+Messages received through Gateway events or read/sent through REST are preserved.
+Edits merge partial updates and retain observed earlier versions. Single and bulk
+deletions mark saved messages without removing their content. Unknown original
+content stays explicitly unknown. It cannot recover content deleted before it
+was observed, or guarantee events from every server channel/user subscription.
+
+`discord_read_history` includes saved deleted messages and edit versions in its
+normal conversation results by default, with explicit `archive` metadata. Set
+`include_archived=false` for live-only history. The original observed version and
+up to nine recent versions are included inline; additional versions are available
+through the paginated archive tools. The native REST tools retain Discord's live
+semantics, including a 404 for a deleted message. Native Discord search excludes
+deleted content; use `discord_archive_search` to search all saved versions.
+
+| Tool | Behavior |
+| --- | --- |
+| `discord_archive_status` | Message/version counts, persistence errors, background recorder connection/heartbeat |
+| `discord_archive_get_message` | Saved message and all paginated observed versions, including after deletion |
+| `discord_archive_read_channel` | Saved channel/DM history without a Discord connection; continue with `next_before` |
+| `discord_archive_search` | Literal-text search across every saved version, including deleted and edited messages |
+
+For background recording after the AI client exits:
+
+```bash
+node dist/index.js archive start --env-file /absolute/path/discordmcp/.env
+node dist/index.js archive status --env-file /absolute/path/discordmcp/.env
+node dist/index.js archive stop --env-file /absolute/path/discordmcp/.env
+```
+
+The detached recorder reconnects and writes to the same database as the MCP.
+It starts one recorder per database and records a heartbeat. It continues while
+the computer/process stays running; it does **not** install reboot autostart.
+For an OS-managed service, run `node dist/index.js --archive-only --env-file ...`.
+Set `MCP_ARCHIVE_AUTOCONNECT=false` in clients using a dedicated background recorder;
+the standalone recorder always connects. Otherwise an enabled archive connects
+its own Gateway when the MCP starts, unless an active background recorder exists.
+OAuth bearer authentication can archive REST reads but cannot run this Gateway.
+
+Retention is unlimited, so disk use grows with observed messages and versions.
+Attachment metadata and URLs are saved; attachment files are not downloaded and
+their URLs may expire. Recording can miss content during offline/unresumable gaps.
+See [archive behavior and operation](docs/MESSAGE_ARCHIVE.md) for exact coverage,
+credential rotation, storage, and reproducible live testing.
+
+## Conservative request pacing
+
+All production MCP transports apply shared local pacing before every outgoing REST
+request and application Gateway command. Managed heartbeats/connection lifecycle
+keep their protocol timing; receiving archive events does not poll message history.
+
+- Minimum 2 seconds between outgoing requests, 6 seconds between mutations, plus
+  0–500 ms scheduling variation. Configure longer delays in `.env` if needed.
+- Shared rolling caps: 20 requests and 4 mutations per minute across local clients
+  using the same pacing state. Requests wait for their slot instead of racing.
+- After 45 minutes of sustained API activity, pause outgoing operations for 10
+  minutes. Ordinary idle periods reset the activity window; passive logging alone
+  does not start a long-operation window.
+- Honor Discord's response bucket/global limits and `retry_after`. Three repeated
+  429s, a wait above 60 seconds, or three network failures stop outgoing activity
+  for at least 10 minutes. Ambiguous writes are never automatically retried.
+- HTTP 401, account-verification code 40002, CAPTCHA fields, and Gateway invalid
+  authentication pause that credential. Active recorders disconnect when they see
+  the shared account pause. Resolve verification in Discord and update credentials.
+- A forbidden route (HTTP 403) is cooled for 15 minutes; repeated attempts cannot
+  generate a rapid series of invalid requests. Messaging-restriction responses
+  40003/40004 pause outgoing activity for 15 minutes.
+
+`discord_capabilities.request_pacing` reports active limits, pauses, and rest time.
+The queue holds at most 10 pending REST calls per process. A queued slot requiring
+more than two minutes is rejected with an explicit retry-later result. Some long
+workflows need a longer MCP client tool timeout or smaller history batches.
+
+The pacing and stop behaviors were implemented independently after reviewing
+[Discrub's published source](https://github.com/pratherbytecraft/discrub/tree/95c5f908d80bcd3e78ba8694b114a59ef46804ba).
+No Discrub code is incorporated. Timing variation controls load; it does not make
+user-token automation indistinguishable from a person or guarantee against account
+flags. See [operating safeguards](docs/OPERATING_GUIDE.md) for scope and references.
 
 ## What the AI can do
 

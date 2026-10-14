@@ -7,7 +7,7 @@ import { redact } from './security.js';
 export interface GatewayEvent { id: number; type: string; received_at: string; sequence: number | null; data: unknown }
 interface Payload { op: number; d: any; s?: number | null; t?: string }
 type State = 'disconnected' | 'connecting' | 'ready' | 'reconnecting';
-interface GatewayOptions { socketFactory?: (url: URL) => WebSocket; maxBufferedBytes?: number }
+interface GatewayOptions { socketFactory?: (url: URL) => WebSocket; maxBufferedBytes?: number; beforeApplicationSend?: () => Promise<unknown>; onAuthenticationFailure?: () => void }
 const FATAL_CODES = new Set([4004, 4010, 4011, 4012, 4013, 4014]);
 export class DiscordGateway {
   private socket?: WebSocket;
@@ -40,6 +40,10 @@ export class DiscordGateway {
       oldest_event_id: this.events[0]?.id ?? null, latest_event_id: this.nextId - 1,
       last_error: this.lastError ?? null };
   }
+  onDispatch(listener: (event: GatewayEvent) => void) {
+    this.emitter.on('dispatch', listener);
+    return () => { this.emitter.off('dispatch', listener); };
+  }
   async connect() {
     if (this.state === 'ready') return this.status();
     if (this.connectPromise) return this.connectPromise;
@@ -58,6 +62,7 @@ export class DiscordGateway {
         const response = await this.rest.request({ method: 'GET', path: '/gateway' });
         this.gatewayUrl = (response.data as { url: string }).url;
       }
+      if (!this.running) throw new Error('Gateway disconnected before startup completed.');
       const result = new Promise<unknown>((resolve, reject) => {
         const timer = setTimeout(() => { cleanup(); reject(new Error('Gateway did not become ready within 20 seconds.')); }, 20_000);
         const ready = () => { cleanup(); resolve(this.status()); };
@@ -91,6 +96,7 @@ export class DiscordGateway {
       this.state = 'disconnected';
       if (FATAL_CODES.has(code)) {
         this.running = false;
+        if (code === 4004) { try { this.options.onAuthenticationFailure?.(); } catch { /* The fatal connection remains stopped if safety persistence fails. */ } }
         this.lastError = `Gateway rejected the connection (close code ${code}). Check authentication and bot intents.`;
         this.emitter.emit('fatal', this.lastError);
       } else if (this.running) {
@@ -146,6 +152,7 @@ export class DiscordGateway {
     while (this.events.length > 500 || this.bufferedBytes > (this.options.maxBufferedBytes ?? 32 * 1024 * 1024)) {
       this.events.shift(); this.bufferedBytes -= this.eventSizes.shift()!;
     }
+    this.emitter.emit('dispatch', event);
     this.emitter.emit('event');
   }
   private transmit(op: number, data: unknown) {
@@ -161,6 +168,10 @@ export class DiscordGateway {
     if (this.config.readOnly) throw new Error('MCP_READ_ONLY blocks application Gateway commands.');
     if (this.state !== 'ready') throw new Error('Call discord_gateway_connect first and wait for ready.');
     if (!Number.isInteger(op) || op < 0 || op > 255 || [0, 1, 2, 6, 7, 9, 10, 11].includes(op)) throw new Error('Use an application Gateway opcode; lifecycle opcodes are managed by this server.');
+    if (this.options.beforeApplicationSend) return this.options.beforeApplicationSend().then(() => {
+      if (this.state !== 'ready') throw new Error('Gateway disconnected during the request pacing wait.');
+      this.transmit(op, data); return { sent: true, opcode: op };
+    });
     this.transmit(op, data);
     return { sent: true, opcode: op };
   }
