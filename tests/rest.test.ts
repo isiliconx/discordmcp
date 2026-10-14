@@ -20,7 +20,7 @@ test('user, bot, and OAuth authentication; paths, arrays, reason, and 204 respon
 test('429 retries respect fractional/global limits, and learned buckets apply across routes', async () => {
   let now = 1000, count = 0;
   const waits: number[] = [];
-  const rest = new DiscordRest({ token, authType: 'user', now: () => now,
+  const rest = new DiscordRest({ token, authType: 'bot', now: () => now,
     sleep: async ms => { waits.push(ms); now += ms; },
     fetch: async () => {
       count++;
@@ -103,4 +103,27 @@ test('cancelled queued work is never sent and the request queue recovers from fa
   await first; await assert.rejects(second);
   await rest.request({ method: 'GET', path: '/users/456' });
   assert.equal(calls, 2);
+});
+test('user message lookup uses history, returns the exact target, and refuses nearby/deleted messages', async () => {
+  let calls = 0;
+  const rest = new DiscordRest({ token, authType: 'user', fetch: async (url, init) => {
+    calls++;
+    assert.equal(String(url), 'https://discord.com/api/v10/channels/123456/messages?around=987654&limit=1');
+    assert.equal((init!.headers as any).Authorization, token);
+    return response([{ id: calls === 1 ? '987654' : '987655', content: 'body' }]);
+  } });
+  const request = { method: 'GET' as const, path: '/channels/123456/messages/987654' };
+  assert.deepEqual(await rest.request(request), { status: 200, data: { id: '987654', content: 'body' } });
+  await assert.rejects(rest.request(request), error => error instanceof DiscordApiError && error.status === 404 && (error.details as any).code === 10008);
+});
+test('bot and OAuth message lookups retain the direct endpoint and user lookups propagate access errors', async () => {
+  for (const authType of ['bot', 'oauth'] as const) {
+    const rest = new DiscordRest({ token, authType, fetch: async url => {
+      assert.equal(String(url), 'https://discord.com/api/v10/channels/123/messages/456');
+      return response({ id: '456' });
+    } });
+    assert.deepEqual((await rest.request({ method: 'GET', path: '/channels/123/messages/456' })).data, { id: '456' });
+  }
+  const rest = new DiscordRest({ token, authType: 'user', fetch: async () => response({ message: 'Missing Access', code: 50001 }, 403) });
+  await assert.rejects(rest.request({ method: 'GET', path: '/channels/123/messages/456' }), error => error instanceof DiscordApiError && error.status === 403);
 });

@@ -23,6 +23,10 @@ function experimental(id: string, method: Operation['method'], path: string, des
 }
 export const userOperations = [
   experimental('list_private_channels', 'GET', '/users/@me/channels', 'List the account’s DM and group DM channels.'),
+  experimental('create_group_dm', 'POST', '/users/@me/channels', 'Create a group DM with recipient IDs. An empty recipients array creates a self-only group DM.', {
+    type: 'object', properties: { recipients: { type: 'array', maxItems: 9, items: { type: 'string', pattern: '^(0|[1-9][0-9]*)$' } } },
+    required: ['recipients'], additionalProperties: true,
+  }, true),
   experimental('list_relationships', 'GET', '/users/@me/relationships', 'List friends, blocks, and pending friend requests.'),
   experimental('send_friend_request', 'POST', '/users/@me/relationships', 'Send a friend request by username.', {
     type: 'object', properties: { username: { type: 'string' }, discriminator: { type: 'string' } }, required: ['username'], additionalProperties: true,

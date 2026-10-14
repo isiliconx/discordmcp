@@ -4,8 +4,8 @@ Give an MCP-compatible AI client access to Discord through a locally held token.
 The setup command saves your token privately and generates the MCP configuration
 you can add to your client. Supports stdio and authenticated Streamable HTTP.
 
-**278 tools in full mode:** 246 public REST operations generated from Discord’s
-official v10 API specification, 19 experimental user-account operations, and 13
+**279 tools in full mode:** 246 public REST operations generated from Discord’s
+official v10 API specification, 20 experimental user-account operations, and 13
 MCP/Gateway helper tools. All operations remain callable in compact mode.
 No read-only restriction is imposed by the server: actions run with the supplied
 account’s Discord permissions. The MCP client may require its own tool approvals.
@@ -20,7 +20,8 @@ API coverage does **not** mean every Discord client feature is implemented or th
 every endpoint accepts a user token. Voice-state signalling is available; voice
 audio/video streaming, screen sharing, billing, CAPTCHA/MFA flows, and some
 undocumented client features are not implemented. Live user-account compatibility
-has not been verified. OAuth2 scopes and Discord permissions still apply.
+has been verified for the subset listed in [live validation](docs/LIVE_VALIDATION.md).
+OAuth2 scopes and Discord permissions still apply.
 
 ## Quick start
 
@@ -73,10 +74,10 @@ client’s `env` configuration to supply `DISCORD_TOKEN` and `DISCORD_AUTH_TYPE`
 instead of an environment file, but the client configuration then contains a
 credential. Setup keeps credentials in `.env` instead.
 
-Full mode advertises all 278 tools in one tools/list response. Some clients have
+Full mode advertises all 279 tools in one tools/list response. Some clients have
 limits on tool count or context size. Set `MCP_TOOL_MODE=compact` in `.env` to
 advertise only the 13 helpers; the AI then uses `discord_search_tools`,
-`discord_describe_operation`, and `discord_call` to access any of the 265 REST
+`discord_describe_operation`, and `discord_call` to access any of the 266 REST
 operations. This does not reduce available actions.
 
 ## What the AI can do
@@ -93,6 +94,11 @@ operations. This does not reduce available actions.
 The [generated tool list](docs/TOOLS.md) contains every public REST operation.
 [Experimental operations](docs/EXPERIMENTAL.md) lists the user-specific tools.
 The `discord://guide` and `discord://capabilities` MCP resources provide usage hints.
+In user mode, `discord_get_message` uses an exact-ID lookup in channel history,
+because Discord restricts the direct single-message endpoint to bots. Missing or
+deleted messages return a 404; a neighboring message is never returned instead.
+The same adaptation applies to that path through `discord_api_request`.
+
 Schemas for complex nested request fields are compacted in tools/list; use
 `discord_describe_operation` for the full upstream request definitions.
 
@@ -220,15 +226,20 @@ need an authentication proxy; the server does not implement MCP OAuth discovery.
 ```bash
 npm run check        # TypeScript build, automated tests, generated-catalog verification
 npm run smoke:live   # Read-only live checks; requires your locally configured Discord token
+npm run smoke:live -- --isolated  # Self-only group-DM message/upload/Gateway tests, then cleanup
 ```
 
 Automated tests use fake credentials and mock Discord responses. They exercise
 REST authentication/error handling, rate-limit queues, uploads, path validation,
 Gateway events, and actual MCP clients over stdio and HTTP. They do not establish
-live endpoint compatibility. The live smoke test reads the current user, server
+live endpoint compatibility. The default live smoke test reads the current user, server
 list, and (user mode only) DM channel list; it prints status only, without personal
-data. It does not send messages or change account settings. OAuth scopes must
-cover the selected checks.
+data. The default mode does not send messages or change account settings. OAuth
+scopes must cover the selected checks. `--isolated` is a user-mode suite that
+creates a self-only group DM, verifies message/reaction/pin/upload/Gateway behavior,
+deletes its test messages, and leaves the group. The 22-check isolated suite and
+additional HTTP/account reads have passed against a live account; see the
+[validation record](docs/LIVE_VALIDATION.md) for coverage and remaining failures.
 
 The public catalog is reproducibly generated from the pinned
 [official specification](https://github.com/discord/discord-api-spec). See

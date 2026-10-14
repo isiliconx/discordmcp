@@ -4,11 +4,13 @@ These undocumented client endpoints are exposed as separate tools in full mode,
 and through `discord_call` in either mode. They use the server’s configured
 authentication without bypassing Discord permissions, account verification, or
 challenges. User tokens are outside Discord’s supported bot/OAuth API; these
-operations have not been verified against a live account and can change at any time.
+operations can change at any time. See [live validation](LIVE_VALIDATION.md) for the
+subset verified against a real account.
 
 | Tool | Purpose |
 | --- | --- |
 | `discord_list_private_channels` | DM and group DM channel list |
+| `discord_create_group_dm` | Group DM by recipient IDs; empty array creates a self-only group |
 | `discord_list_relationships` | Friends, blocks, requests |
 | `discord_send_friend_request` | Request by username |
 | `discord_set_relationship` | Friend/request (`type: 1`) or block (`type: 2`) by ID |

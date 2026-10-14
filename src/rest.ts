@@ -34,9 +34,24 @@ export class DiscordRest {
   }
   request(request: ApiRequest, signal?: AbortSignal): Promise<ApiResponse> {
     // Serialize requests per account so simultaneous AI calls cannot race a learned bucket.
-    const work = this.tail.then(() => this.perform(request, signal));
+    const work = this.tail.then(() => this.performWithCompatibility(request, signal));
     this.tail = work.catch(() => undefined);
     return work;
+  }
+  private async performWithCompatibility(request: ApiRequest, signal?: AbortSignal): Promise<ApiResponse> {
+    // Discord's single-message endpoint returns 20002 (bots only) for user accounts.
+    // User accounts can read history instead. Match the exact ID so a nearby message
+    // is never accidentally returned when the requested message is missing/deleted.
+    const singleMessage = /^\/channels\/(\d+)\/messages\/(\d+)$/.exec(request.path);
+    if (this.options.authType === 'user' && request.method === 'GET' && singleMessage) {
+      if (request.body !== undefined || request.files?.length) throw new Error('GET requests cannot have a body or files.');
+      const response = await this.perform({ method: 'GET', path: `/channels/${singleMessage[1]}/messages`,
+        query: { ...request.query, around: singleMessage[2], limit: 1 } }, signal);
+      const message = Array.isArray(response.data) ? response.data.find(item => item?.id === singleMessage[2]) : undefined;
+      if (!message) throw new DiscordApiError(404, { message: 'Unknown Message', code: 10008 });
+      return { status: 200, data: message };
+    }
+    return this.perform(request, signal);
   }
   private async perform(request: ApiRequest, signal?: AbortSignal): Promise<ApiResponse> {
     signal?.throwIfAborted();
