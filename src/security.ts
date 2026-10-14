@@ -19,6 +19,7 @@ export function matchesSecret(received: string, expected: string): boolean {
 }
 
 export function validateApiPath(path: string): void {
+  if (path.length > 4096) throw new Error('Discord API path is too long.');
   if (!path.startsWith('/') || path.startsWith('//') || /[\\?#\s\u0000-\u001f\u007f]/.test(path)) {
     throw new Error('Use a relative Discord API path such as /channels/123/messages; pass query separately.');
   }

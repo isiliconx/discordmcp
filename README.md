@@ -4,8 +4,8 @@ Give an MCP-compatible AI client access to Discord through a locally held token.
 The setup command saves your token privately and generates the MCP configuration
 you can add to your client. Supports stdio and authenticated Streamable HTTP.
 
-**279 tools in full mode:** 246 public REST operations generated from Discord’s
-official v10 API specification, 20 experimental user-account operations, and 13
+**283 tools in full mode:** 246 public REST operations generated from Discord’s
+official v10 API specification, 20 experimental user-account operations, and 17
 MCP/Gateway helper tools. All operations remain callable in compact mode.
 No read-only restriction is imposed by the server: actions run with the supplied
 account’s Discord permissions. The MCP client may require its own tool approvals.
@@ -74,11 +74,59 @@ client’s `env` configuration to supply `DISCORD_TOKEN` and `DISCORD_AUTH_TYPE`
 instead of an environment file, but the client configuration then contains a
 credential. Setup keeps credentials in `.env` instead.
 
-Full mode advertises all 279 tools in one tools/list response. Some clients have
+Full mode advertises all 283 tools in one tools/list response. Some clients have
 limits on tool count or context size. Set `MCP_TOOL_MODE=compact` in `.env` to
-advertise only the 13 helpers; the AI then uses `discord_search_tools`,
+advertise only the 17 helpers; the AI then uses `discord_search_tools`,
 `discord_describe_operation`, and `discord_call` to access any of the 266 REST
 operations. This does not reduce available actions.
+
+## Workflow helpers
+
+Version 1.1 adds four direct MCP tools for common AI workflows:
+
+| Tool | Behavior |
+| --- | --- |
+| `discord_send_message` | Text send with mentions disabled by default and recent-duplicate detection using a nonce |
+| `discord_reply_to_message` | Exact reply target; missing targets fail; no automatic reply ping |
+| `discord_read_history` | Bounded, resumable older-history reads with signed cursors and a stable newest-message boundary |
+| `discord_search_messages` | Guild/DM search with explicit index readiness, flattened matches, and pagination metadata |
+
+For history, pass `channel_id` and optionally `max_messages` (default 100, maximum
+1000), `page_size` (1–100), and `format` (`compact` or `full`). Continue using
+`next_cursor` until `reached_start`. Each call makes at most 20 history requests;
+the cursor carries the continuation rather than holding an unbounded request open.
+Cursors survive process restarts with the same account token, reject modification
+or use with another channel/account, and retain the initial newest-message
+boundary. They are signed, not encrypted. Rotating the account token invalidates
+old cursors. `reached_start` means the end of history accessible to this account.
+
+For search, supply `guild_id`, `channel_id`, or both, plus Discord filters in
+`query`. With both IDs, the guild search is restricted to that channel. Indexing
+responses return `index_ready: false`, not an invented zero-result answer. The
+helper waits up to `max_wait_ms` (default 10000, maximum 30000) for an indexing
+response to resolve. Already indexed searches can still lag very new posts.
+`next_offset` supports paging; `pagination_limit_reached` identifies Discord’s
+search offset limit. Use history for exhaustive reading, or date/ID partitions
+for searches beyond the native offset limit.
+
+For sends/replies, choose a stable `nonce` (1–25 characters) before the first
+attempt if retrying the same action might be necessary. Discord checks recently
+used nonces; the live test verified repeat sends returned the existing message ID.
+This is a recent retry safeguard, not permanent idempotency. The tool returns its
+nonce and includes it in ambiguous network-failure errors. Never reuse a nonce
+for a different action. Full message payloads/uploads remain available through
+`discord_create_message`.
+
+Message sends/edits and ordinary webhook sends suppress mentions when
+`allowed_mentions` is absent, including through the general API tool. Explicit
+`allowed_mentions` choices remain available.
+
+Set `MCP_READ_ONLY=true` to block API writes and application Gateway commands at
+the server. Reads, history/search, and Gateway event monitoring remain available;
+Gateway connection lifecycle still runs. Full access is the default. The setting
+applies to every tool, including the general API and helper tools, and requires a
+server restart to change. See the [operating safeguards](docs/OPERATING_GUIDE.md)
+for exact boundaries and verification.
 
 ## What the AI can do
 
@@ -181,7 +229,7 @@ User-mode Gateway support is experimental and may be rejected by Discord.
 `discord_gateway_events` reads buffered events. `discord_gateway_wait_events`
 waits up to 30 seconds. Pass the returned `next_cursor` as `after` on the next call
 and optionally filter `types`, such as `["MESSAGE_CREATE"]`. The cursor is a local
-event ID. Up to 500 events are retained in memory, shared across connected clients;
+event ID. Up to 500 events (32 MiB total) are retained in memory, shared across connected clients;
 `dropped_events` signals a cursor gap. There is no durable event storage.
 
 `discord_set_presence` sends opcode 3. `discord_gateway_update_voice_state` sends
@@ -237,7 +285,7 @@ list, and (user mode only) DM channel list; it prints status only, without perso
 data. The default mode does not send messages or change account settings. OAuth
 scopes must cover the selected checks. `--isolated` is a user-mode suite that
 creates a self-only group DM, verifies message/reaction/pin/upload/Gateway behavior,
-deletes its test messages, and leaves the group. The 22-check isolated suite and
+deletes its test messages, and leaves the group. The 30-check isolated suite and
 additional HTTP/account reads have passed against a live account; see the
 [validation record](docs/LIVE_VALIDATION.md) for coverage and remaining failures.
 

@@ -18,7 +18,8 @@ export function createHttpServer(runtime: DiscordRuntime): HttpServer {
   const config = runtime.config;
   if (config.httpToken.length < 32) throw new Error('HTTP mode requires MCP_HTTP_TOKEN with at least 32 characters.');
   if (matchesSecret(config.httpToken, config.token)) throw new Error('MCP_HTTP_TOKEN must be different from DISCORD_TOKEN.');
-  return createServer(async (req, res) => {
+  let activeRequests = 0;
+  const listener = createServer({ requestTimeout: 60_000, headersTimeout: 10_000, keepAliveTimeout: 5000 }, async (req, res) => {
     const respond = (status: number, message: string) => {
       if (!res.headersSent) { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: message })); }
     };
@@ -39,6 +40,13 @@ export function createHttpServer(runtime: DiscordRuntime): HttpServer {
     if (path !== '/mcp') { respond(404, 'Use /mcp.'); return; }
     if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); respond(405, 'Stateless MCP uses POST.'); return; }
     if (!req.headers['content-type']?.startsWith('application/json')) { respond(415, 'Content-Type must be application/json.'); return; }
+    if (Number(req.headers['content-length']) > MAX_BODY) {
+      res.setHeader('Connection', 'close'); res.once('finish', () => req.destroy());
+      respond(413, 'Request body exceeds 36 MiB.'); return;
+    }
+    if (activeRequests >= 8) { res.setHeader('Retry-After', '1'); respond(503, 'Too many active MCP requests; retry later.'); return; }
+    activeRequests++;
+    res.once('close', () => { activeRequests--; });
     let body: unknown;
     try { body = await parseBody(req); } catch { respond(400, 'Invalid or oversized JSON request body.'); return; }
     const server = createMcpServer(runtime);
@@ -48,4 +56,6 @@ export function createHttpServer(runtime: DiscordRuntime): HttpServer {
     try { await server.connect(transport); await transport.handleRequest(req, res, body); }
     catch { respond(500, 'MCP request failed.'); await server.close(); }
   });
+  listener.maxConnections = 64;
+  return listener;
 }

@@ -1,6 +1,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { ApiRequest, ApiResponse, AuthType } from './types.js';
 import { redact, validateApiPath } from './security.js';
+import { VERSION } from './version.js';
 
 export class DiscordApiError extends Error {
   constructor(public readonly status: number, public readonly details: unknown) {
@@ -15,6 +16,9 @@ interface RestOptions {
   sleep?: (ms: number, signal?: AbortSignal) => Promise<unknown>;
   requestTimeoutMs?: number;
   maxRateLimitWaitMs?: number;
+  readOnly?: boolean;
+  maxPendingRequests?: number;
+  maxResponseBytes?: number;
 }
 const BASE_URL = 'https://discord.com/api/v10';
 const MAX_UPLOAD = 25 * 1024 * 1024;
@@ -24,6 +28,7 @@ export class DiscordRest {
   private readonly deadlines = new Map<string, number>();
   private readonly buckets = new Map<string, string>();
   private globalDeadline = 0;
+  private pendingRequests = 0;
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => number;
   private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<unknown>;
@@ -33,10 +38,14 @@ export class DiscordRest {
     this.sleep = options.sleep ?? ((ms, signal) => sleep(ms, undefined, { signal }));
   }
   request(request: ApiRequest, signal?: AbortSignal): Promise<ApiResponse> {
+    if (this.options.readOnly && request.method !== 'GET') return Promise.reject(new Error('MCP_READ_ONLY blocks Discord API writes.'));
+    if (this.pendingRequests >= (this.options.maxPendingRequests ?? 100)) return Promise.reject(new Error('Discord request queue is full; retry later.'));
+    this.pendingRequests++;
     // Serialize requests per account so simultaneous AI calls cannot race a learned bucket.
     const work = this.tail.then(() => this.performWithCompatibility(request, signal));
-    this.tail = work.catch(() => undefined);
-    return work;
+    const tracked = work.finally(() => { this.pendingRequests--; });
+    this.tail = tracked.catch(() => undefined);
+    return tracked;
   }
   private async performWithCompatibility(request: ApiRequest, signal?: AbortSignal): Promise<ApiResponse> {
     // Discord's single-message endpoint returns 20002 (bots only) for user accounts.
@@ -58,6 +67,14 @@ export class DiscordRest {
     validateApiPath(request.path);
     if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)) throw new Error('Unsupported HTTP method.');
     if (request.method === 'GET' && (request.body !== undefined || request.files?.length)) throw new Error('GET requests cannot have a body or files.');
+    // Preserve explicit mention choices, but keep ordinary sends/edits quiet by default.
+    const messageRoute = /^\/channels\/\d+\/messages(?:\/\d+)?$/.test(request.path)
+      || /^\/webhooks\/\d+\/[^/]+(?:\/messages\/(?:\d+|@original))?$/.test(request.path);
+    if (messageRoute && ['POST', 'PATCH'].includes(request.method) &&
+        (request.body === undefined || (request.body !== null && typeof request.body === 'object' && !Array.isArray(request.body)))) {
+      const payload = request.body as Record<string, unknown> | undefined;
+      if (!payload || !Object.hasOwn(payload, 'allowed_mentions')) request = { ...request, body: { ...payload, allowed_mentions: { parse: [], replied_user: false } } };
+    }
     const url = new URL(BASE_URL + request.path);
     for (const [key, value] of Object.entries(request.query ?? {})) {
       if (value == null) continue;
@@ -69,7 +86,7 @@ export class DiscordRest {
     const headers: Record<string, string> = {
       Authorization: this.options.authType === 'user' ? this.options.token
         : `${this.options.authType === 'bot' ? 'Bot' : 'Bearer'} ${this.options.token}`,
-      'User-Agent': 'DiscordBot (https://github.com/isiliconx/discordmcp, 0.1.0)',
+      'User-Agent': `DiscordBot (https://github.com/isiliconx/discordmcp, ${VERSION})`,
     };
     if (request.reason !== undefined) {
       if (request.reason.length > 512) throw new Error('Audit log reason must be at most 512 characters.');
@@ -107,7 +124,10 @@ export class DiscordRest {
         this.deadlines.set(bucketKey, this.now() + Math.ceil(resetAfter * 1000));
       }
       let raw: string;
-      try { raw = await response.text(); } catch { throw new Error('Discord response was interrupted. Check before repeating a write.'); }
+      try { raw = await this.readResponse(response); } catch (error) {
+        if (error instanceof Error && error.message === 'Discord response exceeds this server’s size limit.') throw error;
+        throw new Error('Discord response was interrupted. Check before repeating a write.');
+      }
       let data: unknown = null;
       if (raw) { try { data = JSON.parse(raw); } catch { data = raw; } }
       if (response.status === 429 && attempt < 5) {
@@ -124,6 +144,25 @@ export class DiscordRest {
       return { status: response.status, data: safeData };
     }
     throw new Error('Discord rate limit retry budget exhausted.');
+  }
+  private async readResponse(response: Response): Promise<string> {
+    const limit = this.options.maxResponseBytes ?? 16 * 1024 * 1024;
+    const declaredSize = Number(response.headers.get('content-length'));
+    if (Number.isFinite(declaredSize) && declaredSize > limit) {
+      await response.body?.cancel(); throw new Error('Discord response exceeds this server’s size limit.');
+    }
+    if (!response.body) return '';
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = []; let total = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read(); if (done) break;
+        total += value.byteLength;
+        if (total > limit) { await reader.cancel(); throw new Error('Discord response exceeds this server’s size limit.'); }
+        chunks.push(value);
+      }
+      return Buffer.concat(chunks, total).toString('utf8');
+    } finally { reader.releaseLock(); }
   }
   private makeBody(request: ApiRequest, headers: Record<string, string>): BodyInit | undefined {
     const multipart = request.content_type === 'multipart' || Boolean(request.files?.length);

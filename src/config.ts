@@ -10,6 +10,7 @@ export interface Config {
   allowedHosts: string[];
   allowedOrigins: string[];
   toolMode: 'full' | 'compact';
+  readOnly: boolean;
 }
 const csv = (value: string | undefined) => (value ?? '').split(',').map(s => s.trim()).filter(Boolean);
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -25,9 +26,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const host = env.MCP_HTTP_HOST ?? '127.0.0.1';
   const toolMode = env.MCP_TOOL_MODE ?? 'full';
   if (!['full', 'compact'].includes(toolMode)) throw new Error('MCP_TOOL_MODE must be full or compact.');
+  const readOnly = env.MCP_READ_ONLY ?? 'false';
+  if (!['true', 'false', '1', '0'].includes(readOnly)) throw new Error('MCP_READ_ONLY must be true or false.');
   const localHostHeaders = ['localhost', '127.0.0.1', '[::1]'].flatMap(h => [h, `${h}:${port}`]);
   return { token, authType: authType as AuthType, intents, port, host,
     httpToken: env.MCP_HTTP_TOKEN?.trim() ?? '',
     allowedHosts: [...localHostHeaders, ...csv(env.MCP_ALLOWED_HOSTS)],
-    allowedOrigins: csv(env.MCP_ALLOWED_ORIGINS), toolMode: toolMode as Config['toolMode'] };
+    allowedOrigins: csv(env.MCP_ALLOWED_ORIGINS), toolMode: toolMode as Config['toolMode'], readOnly: ['true', '1'].includes(readOnly) };
 }

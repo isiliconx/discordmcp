@@ -1,12 +1,24 @@
 {
   "name": "discordmcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Discord MCP server with a complete public REST catalog, experimental user-token mode, and Gateway tools",
   "type": "module",
   "main": "dist/index.js",
-  "bin": { "discordmcp": "dist/index.js" },
-  "engines": { "node": ">=22" },
-  "files": ["dist", "data", "vendor", "README.md", "LICENSE"],
+  "bin": {
+    "discordmcp": "dist/index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "data",
+    "vendor",
+    "docs",
+    ".env.example",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
@@ -22,7 +34,12 @@
     "type": "git",
     "url": "git+https://github.com/isiliconx/discordmcp.git"
   },
-  "keywords": ["discord", "mcp", "model-context-protocol", "ai"],
+  "keywords": [
+    "discord",
+    "mcp",
+    "model-context-protocol",
+    "ai"
+  ],
   "author": "isiliconx",
   "license": "MIT",
   "bugs": {

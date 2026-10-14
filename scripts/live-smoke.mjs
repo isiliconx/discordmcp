@@ -21,6 +21,7 @@ const transport = new StdioClientTransport({
   env: { ...process.env, MCP_TOOL_MODE: 'compact' },
 });
 let channelId;
+const extraMessages = new Set();
 let passed = 0, failed = 0;
 const data = result => result.structuredContent?.data;
 const check = (label, result, ...assertions) => {
@@ -59,6 +60,52 @@ try {
       const route = { channel_id: channelId, message_id: messageId };
       const read = await call('discord_get_message', route);
       check('Read exact message', read, data(read)?.id === messageId && data(read)?.content === marker);
+      const nonce = randomUUID().replaceAll('-', '').slice(0, 20);
+      const sendArgs = { channel_id: channelId, content: marker + ' @everyone @here', nonce };
+      const safeSend = await client.callTool({ name: 'discord_send_message', arguments: sendArgs });
+      if (!safeSend.isError && data(safeSend)?.id) extraMessages.add(data(safeSend).id);
+      if (check('Send helper suppresses everyone/here', safeSend, data(safeSend)?.mention_everyone === false)) {
+        const repeated = await client.callTool({ name: 'discord_send_message', arguments: sendArgs });
+        if (!repeated.isError && data(repeated)?.id) extraMessages.add(data(repeated).id);
+        check('Same nonce prevents duplicate send', repeated, data(repeated)?.id === data(safeSend).id);
+      }
+      const reply = await client.callTool({ name: 'discord_reply_to_message', arguments: { channel_id: channelId, message_id: messageId, content: marker + ' reply' } });
+      if (!reply.isError && data(reply)?.id) extraMessages.add(data(reply).id);
+      check('Reply references exact message', reply, data(reply)?.type === 19 && data(reply)?.message_reference?.message_id === messageId);
+      const missingReply = await client.callTool({ name: 'discord_reply_to_message', arguments: { channel_id: channelId, message_id: '1', content: marker + ' invalid target' } });
+      check('Missing reply target rejected', { isError: false }, Boolean(missingReply.isError));
+      const recent = await call('discord_list_messages', { channel_id: channelId, query: { limit: 100 } });
+      const expected = data(recent)?.map(message => message.id) ?? [];
+      let cursor, reachedStart = false;
+      const fetched = [];
+      for (let page = 0; page < 10; page++) {
+        const history = await client.callTool({ name: 'discord_read_history', arguments: {
+          channel_id: channelId, max_messages: 2, page_size: 2, ...(cursor ? { cursor } : {}),
+        } });
+        if (history.isError) break;
+        fetched.push(...history.structuredContent.messages);
+        cursor = history.structuredContent.next_cursor;
+        reachedStart = history.structuredContent.reached_start;
+        if (!cursor) break;
+      }
+      check('Signed history pagination reads every fixture once', { isError: false }, reachedStart && fetched.length === expected.length && new Set(fetched.map(message => message.id)).size === expected.length && expected.every(id => fetched.some(message => message.id === id)));
+      const after = await call('discord_list_messages', { channel_id: channelId, query: { after: messageId, limit: 100 } });
+      check('After cursor fetches newer fixture messages', after, data(after)?.length > 0 && data(after).every(message => BigInt(message.id) > BigInt(messageId)));
+      // Search indexing is eventually consistent even after the API reports ready.
+      // Poll only this isolated conversation for a bounded time and verify exact IDs.
+      let found = false;
+      const deadline = Date.now() + 45_000;
+      do {
+        const search = await client.callTool({ name: 'discord_search_messages', arguments: {
+          channel_id: channelId, query: { content: marker, limit: 25 }, max_wait_ms: 1000,
+        } }, undefined, { timeout: 15_000 });
+        if (search.isError) break;
+        found = Boolean(search.structuredContent.index_ready && expected.every(id => search.structuredContent.results.some(message => message.id === id)));
+        if (found || Date.now() >= deadline) break;
+        const delay = Math.max(1000, Math.min(5000, Number(search.structuredContent.retry_after_seconds ?? 1) * 1000));
+        await new Promise(resolve => setTimeout(resolve, delay));
+      } while (true);
+      check('Private-channel search finds all indexed fixtures', { isError: false }, found);
       const edited = await call('discord_update_message', { ...route, body: { content: marker + ' edited' } });
       check('Edit message', edited, data(edited)?.content === marker + ' edited');
       check('Add reaction', await call('discord_add_my_message_reaction', { ...route, emoji_name: '👍' }));
@@ -89,12 +136,21 @@ try {
       const events = await client.callTool({ name: 'discord_gateway_wait_events', arguments: { types: ['MESSAGE_CREATE'], limit: 100, timeout_ms: 5000 } }, undefined, { timeout: 15_000 });
       check('Live MESSAGE_CREATE event', events, events.structuredContent?.events?.some(event => event.data?.channel_id === channelId && event.data?.content?.startsWith(marker)));
     }
+    let cleaned = true;
+    for (const messageId of extraMessages) {
+      const result = await call('discord_delete_message', { channel_id: channelId, message_id: messageId });
+      if (result.isError) cleaned = false; else extraMessages.delete(messageId);
+    }
+    check('Delete extra reply/send fixtures', { isError: false }, cleaned);
   }
 } catch {
   failed++;
   console.error('Live MCP smoke test failed. Check local configuration.'); process.exitCode = 1;
 } finally {
   if (channelId) {
+    for (const messageId of extraMessages) {
+      try { await call('discord_delete_message', { channel_id: channelId, message_id: messageId }); } catch {}
+    }
     try {
       const left = await call('discord_delete_channel', { channel_id: channelId });
       if (!check('Leave isolated group DM', left)) console.error(`Manual cleanup required for test channel ${channelId}.`);

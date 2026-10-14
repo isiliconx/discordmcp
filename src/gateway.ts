@@ -7,7 +7,7 @@ import { redact } from './security.js';
 export interface GatewayEvent { id: number; type: string; received_at: string; sequence: number | null; data: unknown }
 interface Payload { op: number; d: any; s?: number | null; t?: string }
 type State = 'disconnected' | 'connecting' | 'ready' | 'reconnecting';
-interface GatewayOptions { socketFactory?: (url: URL) => WebSocket }
+interface GatewayOptions { socketFactory?: (url: URL) => WebSocket; maxBufferedBytes?: number }
 const FATAL_CODES = new Set([4004, 4010, 4011, 4012, 4013, 4014]);
 export class DiscordGateway {
   private socket?: WebSocket;
@@ -22,6 +22,9 @@ export class DiscordGateway {
   private gatewayUrl?: string;
   private nextId = 1;
   private events: GatewayEvent[] = [];
+  private eventSizes: number[] = [];
+  private bufferedBytes = 0;
+  private waiters = 0;
   private readonly emitter = new EventEmitter();
   private connectPromise?: Promise<unknown>;
   private reconnectAttempts = 0;
@@ -33,6 +36,7 @@ export class DiscordGateway {
   status() {
     return { state: this.state, auth_type: this.config.authType, intents: this.config.intents,
       experimental: this.config.authType === 'user', buffered_events: this.events.length,
+      buffered_bytes: this.bufferedBytes, active_waiters: this.waiters,
       oldest_event_id: this.events[0]?.id ?? null, latest_event_id: this.nextId - 1,
       last_error: this.lastError ?? null };
   }
@@ -136,8 +140,12 @@ export class DiscordGateway {
     }
   }
   private record(type: string, data: unknown) {
-    this.events.push({ id: this.nextId++, type, received_at: new Date().toISOString(), sequence: this.sequence, data });
-    if (this.events.length > 500) this.events.shift();
+    const event = { id: this.nextId++, type, received_at: new Date().toISOString(), sequence: this.sequence, data };
+    const bytes = Buffer.byteLength(JSON.stringify(event));
+    this.events.push(event); this.eventSizes.push(bytes); this.bufferedBytes += bytes;
+    while (this.events.length > 500 || this.bufferedBytes > (this.options.maxBufferedBytes ?? 32 * 1024 * 1024)) {
+      this.events.shift(); this.bufferedBytes -= this.eventSizes.shift()!;
+    }
     this.emitter.emit('event');
   }
   private transmit(op: number, data: unknown) {
@@ -150,6 +158,7 @@ export class DiscordGateway {
     this.socket.send(JSON.stringify({ op, d: data }));
   }
   send(op: number, data: unknown) {
+    if (this.config.readOnly) throw new Error('MCP_READ_ONLY blocks application Gateway commands.');
     if (this.state !== 'ready') throw new Error('Call discord_gateway_connect first and wait for ready.');
     if (!Number.isInteger(op) || op < 0 || op > 255 || [0, 1, 2, 6, 7, 9, 10, 11].includes(op)) throw new Error('Use an application Gateway opcode; lifecycle opcodes are managed by this server.');
     this.transmit(op, data);
@@ -166,19 +175,21 @@ export class DiscordGateway {
     const events = matching.slice(0, limit);
     return { events, next_cursor: events.at(-1)?.id ?? Math.max(after, this.nextId - 1),
       has_more: matching.length > limit,
-      dropped_events: after > 0 && Boolean(this.events[0] && after < this.events[0].id - 1) };
+      dropped_events: after > 0 && after < (this.events[0]?.id ?? this.nextId) - 1 };
   }
   async waitEvents(after = 0, types: string[] = [], limit = 100, timeoutMs = 15_000, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const initial = this.getEvents(after, types, limit);
     if (initial.events.length || timeoutMs === 0) return initial;
-    await new Promise<void>((resolve, reject) => {
+    if (this.waiters >= 100) throw new Error('Too many Gateway event waiters; retry later.');
+    this.waiters++;
+    try { await new Promise<void>((resolve, reject) => {
       const cleanup = () => { clearTimeout(timer); this.emitter.off('event', listener); signal?.removeEventListener('abort', abort); };
       const listener = () => { if (this.getEvents(after, types, limit).events.length) { cleanup(); resolve(); } };
       const abort = () => { cleanup(); reject(signal?.reason ?? new Error('Cancelled')); };
       const timer = setTimeout(() => { cleanup(); resolve(); }, timeoutMs);
       this.emitter.on('event', listener); signal?.addEventListener('abort', abort, { once: true });
-    });
+    }); } finally { this.waiters--; }
     return this.getEvents(after, types, limit);
   }
   disconnect() {

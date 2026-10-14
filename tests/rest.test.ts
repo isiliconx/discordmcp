@@ -56,7 +56,9 @@ test('multipart attachments and multipart field uploads preserve data and select
     assert(form instanceof FormData);
     assert.equal((init!.headers as any)['Content-Type'], undefined);
     if (calls === 1) {
-      assert.equal(form.get('payload_json'), '{"content":"hello"}');
+      const payload = JSON.parse(String(form.get('payload_json')));
+      assert.equal(payload.content, 'hello');
+      assert.deepEqual(payload.allowed_mentions, { parse: [], replied_user: false });
       assert.equal(await (form.get('files[0]') as File).text(), 'hello');
     } else {
       assert.equal(form.get('name'), 'sticker');
@@ -126,4 +128,32 @@ test('bot and OAuth message lookups retain the direct endpoint and user lookups 
   }
   const rest = new DiscordRest({ token, authType: 'user', fetch: async () => response({ message: 'Missing Access', code: 50001 }, 403) });
   await assert.rejects(rest.request({ method: 'GET', path: '/channels/123/messages/456' }), error => error instanceof DiscordApiError && error.status === 403);
+});
+test('read-only protection blocks every mutating method before network access', async () => {
+  let calls = 0;
+  const rest = new DiscordRest({ token, authType: 'user', readOnly: true, fetch: async () => { calls++; return response({}); } });
+  for (const method of ['POST', 'PUT', 'PATCH', 'DELETE'] as const) await assert.rejects(rest.request({ method, path: '/guilds/123' }), /MCP_READ_ONLY/);
+  await rest.request({ method: 'GET', path: '/users/@me' });
+  assert.equal(calls, 1);
+});
+test('quiet defaults cover sends, edits, and webhooks while explicit mention choices remain available', async () => {
+  const payloads: any[] = [];
+  const rest = new DiscordRest({ token, authType: 'user', fetch: async (_url, init) => { payloads.push(JSON.parse(String(init!.body))); return response({}); } });
+  await rest.request({ method: 'POST', path: '/channels/123/messages', body: { content: '@everyone' } });
+  await rest.request({ method: 'PATCH', path: '/channels/123/messages/456', body: { content: 'edit' } });
+  await rest.request({ method: 'POST', path: '/webhooks/123/example-token', body: { content: '@everyone' } });
+  await rest.request({ method: 'POST', path: '/channels/123/messages', body: { content: '@everyone', allowed_mentions: { parse: ['everyone'] } } });
+  for (const body of payloads.slice(0, 3)) assert.deepEqual(body.allowed_mentions, { parse: [], replied_user: false });
+  assert.deepEqual(payloads[3].allowed_mentions, { parse: ['everyone'] });
+});
+test('response size and request queue limits are enforced and recover without leaking data', async () => {
+  const bounded = new DiscordRest({ token, authType: 'user', maxResponseBytes: 10, fetch: async () => new Response('12345678901') });
+  await assert.rejects(bounded.request({ method: 'GET', path: '/users/@me' }), /size limit/);
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const queued = new DiscordRest({ token, authType: 'user', maxPendingRequests: 1, fetch: async () => { await blocked; return response({}); } });
+  const first = queued.request({ method: 'GET', path: '/users/@me' });
+  await assert.rejects(queued.request({ method: 'GET', path: '/users/123' }), /queue is full/);
+  release(); await first;
+  await queued.request({ method: 'GET', path: '/users/123' });
 });

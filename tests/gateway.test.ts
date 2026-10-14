@@ -18,10 +18,10 @@ class FakeSocket extends EventEmitter {
   dispatch(type: string, data: unknown) { this.emit('message', Buffer.from(JSON.stringify({ op: 0, t: type, s: 1, d: data }))); }
 }
 const config = loadConfig({ DISCORD_TOKEN: 'fake-token-value' });
-function setup(url = 'wss://gateway.discord.gg') {
+function setup(url = 'wss://gateway.discord.gg', maxBufferedBytes?: number) {
   const rest = new DiscordRest({ ...config, fetch: async () => new Response(JSON.stringify({ url })) });
   const sockets: FakeSocket[] = [];
-  const gateway = new DiscordGateway(config, rest, { socketFactory: actualUrl => {
+  const gateway = new DiscordGateway(config, rest, { maxBufferedBytes, socketFactory: actualUrl => {
     assert.equal(actualUrl.search, '?v=10&encoding=json');
     const socket = new FakeSocket(); sockets.push(socket);
     setImmediate(() => socket.emit('message', Buffer.from('{"op":10,"d":{"heartbeat_interval":60000}}')));
@@ -74,5 +74,15 @@ test('Gateway resumes a dropped connection and stops reconnecting on fatal auth 
     sockets[1].close(4004);
     assert.equal(gateway.status().state, 'disconnected');
     assert.match(gateway.status().last_error!, /4004/);
+  } finally { gateway.disconnect(); }
+});
+test('Gateway retention is bounded by bytes and reports dropped events', async () => {
+  const { gateway, sockets } = setup('wss://gateway.discord.gg', 1500);
+  try {
+    await gateway.connect(); const after = gateway.getEvents().next_cursor;
+    for (let i = 0; i < 20; i++) sockets[0].dispatch('MESSAGE_CREATE', { content: 'x'.repeat(500) });
+    assert(gateway.status().buffered_bytes <= 1500);
+    assert(gateway.status().buffered_events < 20);
+    assert(gateway.getEvents(after).dropped_events);
   } finally { gateway.disconnect(); }
 });
